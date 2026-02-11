@@ -1,0 +1,30 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# --- Data & Large Files ---
+# Don't track large datasets
+*.csv
+*.parquet
+*.h5
+*.pickle
+*.jsonl
+# But allow specific small config files if needed
+!config.json
+
+# --- Jupyter Notebooks ---
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
+
+# --- IDEs ---
+.vscode/
+.idea/
+.obsidian/  # Only add this if you're working INSIDE your vault folder
