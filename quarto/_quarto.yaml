@@ -1,0 +1,35 @@
+project:
+  type: website
+  output-dir: docs      # Renders the HTML files into a 'docs' folder for GitHub Pages
+
+website:
+  title: "Quantitative Options Pricing Workbench"
+  description: "Calibrating Black-Scholes, Merton, Heston, and Bates models to WRDS S&P 500 Data."
+  
+  sidebar:
+    style: docked
+    search: true
+    contents:
+      - section: "Part I: Theoretical Frameworks"
+        contents:
+          - 01_BlackSholes.ipynb
+          - 02_MertonJumpDiffusion.ipynb
+          - 03_HestonModel.ipynb
+          - 04_BatesModel.ipynb
+      
+      - section: "Part II: Real Market Calibration"
+        contents:
+          - 05_BS_RealDataCalibration.ipynb
+          - 06_Merton_RealDataCalibration.ipynb
+          - 07_Heston_RealDataCalibration.ipynb
+          - 08_Bates_RealDataCalibration.ipynb
+          
+      - section: "Part III: Synthesis & Testing"
+        contents:
+          - 09_Model_Comparison.ipynb
+          - 10_OutOfSampleTesting.ipynb
+
+format:
+  html:
+    theme: lux
+    css: styles.css
