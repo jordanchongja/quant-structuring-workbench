@@ -23,8 +23,12 @@ if 'portfolio' not in st.session_state:
 # ==========================================
 
 class Instrument(ABC):
-    def __init__(self, position=1.0):
+    def __init__(self, position=1.0, sigma_override=None):
         self.position = position 
+        self.sigma_override = sigma_override # Local Volatility Override
+
+    def get_sigma(self, global_sigma):
+        return self.sigma_override if self.sigma_override is not None else global_sigma
 
     @abstractmethod
     def price(self, S, T, r, sigma):
@@ -38,9 +42,57 @@ class Instrument(ABC):
     def name(self):
         pass
 
+    # --- FINITE DIFFERENCE GREEKS ---
+    def delta(self, S, T, r, sigma):
+        dS = S * 0.001
+        up = self.price(S + dS, T, r, sigma)
+        dn = self.price(S - dS, T, r, sigma)
+        return (up - dn) / (2 * dS)
+
+    def gamma(self, S, T, r, sigma):
+        dS = S * 0.001
+        up = self.price(S + dS, T, r, sigma)
+        mid = self.price(S, T, r, sigma)
+        dn = self.price(S - dS, T, r, sigma)
+        return (up - 2 * mid + dn) / (dS ** 2)
+
+    def vega(self, S, T, r, sigma):
+        dSig = 0.001
+        # Temporarily force the override to bump the active volatility
+        original_override = self.sigma_override
+        base_sig = self.get_sigma(sigma)
+        
+        self.sigma_override = base_sig + dSig
+        up = self.price(S, T, r, sigma)
+        self.sigma_override = base_sig - dSig
+        dn = self.price(S, T, r, sigma)
+        
+        self.sigma_override = original_override # Restore state
+        return (up - dn) / (2 * dSig) / 100 # Scaled to 1% vol change
+
+    def theta(self, S, T, r, sigma):
+        dT = 1 / 365.0 # 1 Day decay
+        if T <= dT: return 0.0
+        # Theta is time decay, so Price(T - 1 day) - Price(T)
+        return (self.price(S, T - dT, r, sigma) - self.price(S, T, r, sigma))
+
+class Stock(Instrument):
+    def __init__(self, position=1.0, sigma_override=None):
+        super().__init__(position, sigma_override)
+
+    def price(self, S, T, r, sigma):
+        return self.position * S
+
+    def payoff(self, S):
+        return self.position * S
+
+    def name(self):
+        side = "Long" if self.position > 0 else "Short"
+        return f"{side} Stock"
+
 class ZeroCouponBond(Instrument):
-    def __init__(self, face_value, position=1.0):
-        super().__init__(position)
+    def __init__(self, face_value, position=1.0, sigma_override=None):
+        super().__init__(position, sigma_override)
         self.face_value = face_value
 
     def price(self, S, T, r, sigma):
@@ -56,33 +108,18 @@ class ZeroCouponBond(Instrument):
         side = "Long" if self.position > 0 else "Short"
         return f"{side} Zero Bond (Face: {self.face_value})"
 
-class Stock(Instrument):
-    def __init__(self, position=1.0):
-        super().__init__(position)
-
-    def price(self, S, T, r, sigma):
-        # The theoretical present value of a non-dividend stock is just its spot price.
-        return self.position * S
-
-    def payoff(self, S):
-        # At expiration, the payoff is simply the terminal value of the stock.
-        return self.position * S
-
-    def name(self):
-        side = "Long" if self.position > 0 else "Short"
-        return f"{side} Stock"
-
 class VanillaOption(Instrument):
-    def __init__(self, K, option_type='call', position=1.0):
-        super().__init__(position)
+    def __init__(self, K, option_type='call', position=1.0, sigma_override=None):
+        super().__init__(position, sigma_override)
         self.K = K
         self.option_type = option_type.lower()
 
     def price(self, S, T, r, sigma):
+        active_sigma = self.get_sigma(sigma) # Inject Local Vol
         if T <= 1e-6: return self.payoff(S)
         S_safe = np.maximum(S, 1e-9) if isinstance(S, np.ndarray) else max(S, 1e-9)
-        d1 = (np.log(S_safe / self.K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-        d2 = d1 - sigma * np.sqrt(T)
+        d1 = (np.log(S_safe / self.K) + (r + 0.5 * active_sigma ** 2) * T) / (active_sigma * np.sqrt(T))
+        d2 = d1 - active_sigma * np.sqrt(T)
         if self.option_type == 'call':
             val = (S_safe * si.norm.cdf(d1) - self.K * np.exp(-r * T) * si.norm.cdf(d2))
         else:
@@ -100,17 +137,18 @@ class VanillaOption(Instrument):
         return f"{side} {self.option_type.capitalize()} (K={self.K})"
 
 class DigitalOption(Instrument):
-    def __init__(self, K, payout=1.0, option_type='call', position=1.0):
-        super().__init__(position)
+    def __init__(self, K, payout=1.0, option_type='call', position=1.0, sigma_override=None):
+        super().__init__(position, sigma_override)
         self.K = K
         self.payout = payout
         self.option_type = option_type.lower()
 
     def price(self, S, T, r, sigma):
+        active_sigma = self.get_sigma(sigma) # Inject Local Vol
         if T <= 1e-6: return self.payoff(S)
         S_safe = np.maximum(S, 1e-9) if isinstance(S, np.ndarray) else max(S, 1e-9)
-        d1 = (np.log(S_safe / self.K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-        d2 = d1 - sigma * np.sqrt(T)
+        d1 = (np.log(S_safe / self.K) + (r + 0.5 * active_sigma ** 2) * T) / (active_sigma * np.sqrt(T))
+        d2 = d1 - active_sigma * np.sqrt(T)
         if self.option_type == 'call':
             val = np.exp(-r * T) * si.norm.cdf(d2) * self.payout
         else:
@@ -124,7 +162,6 @@ class DigitalOption(Instrument):
             else:
                 return self.position * np.where(S < self.K, self.payout, 0.0)
         else:
-            # Scalar fallback
             if self.option_type == 'call':
                 return self.position * self.payout if S > self.K else 0.0
             return self.position * self.payout if S < self.K else 0.0
@@ -284,38 +321,57 @@ with tab1:
     
     with col_ctrl:
         st.subheader("Add Legs")
-        inst_type = st.selectbox("Type", ["Vanilla Option", "Digital Option", "Zero Bond", "Stock"])
-        side = st.selectbox("Side", ["Long", "Short"])
+        inst_type = st.selectbox("Type", ["Stock", "Vanilla Option", "Zero Bond", "Digital Option"])
+        side = st.radio("Side", ["Long", "Short"], horizontal=True)
         pos = 1.0 if side == "Long" else -1.0
         
-        if inst_type == "Vanilla Option":
-            otype = st.radio("Option", ["Call", "Put"])
-            k = st.number_input("Strike", value=100.0)
+        # Local Volatility Override UI
+        use_local_vol = st.checkbox("Override Global Volatility (Smile)")
+        local_vol = st.number_input("Local Volatility (σ)", value=0.20, step=0.01) if use_local_vol else None
+        
+        if inst_type == "Stock":
+            if st.button("Add Stock"):
+                st.session_state.portfolio.append(Stock(pos, sigma_override=local_vol))
+                st.rerun()
+                
+        elif inst_type == "Vanilla Option":
+            otype = st.radio("Option", ["Call", "Put"], horizontal=True)
+            k = st.number_input("Strike", value=100.0, step=0.5)
             if st.button("Add Leg"):
-                st.session_state.portfolio.append(VanillaOption(k, otype, pos))
+                st.session_state.portfolio.append(VanillaOption(k, otype, pos, sigma_override=local_vol))
+                st.rerun()
                 
         elif inst_type == "Digital Option":
-            otype = st.radio("Digi Type", ["Call", "Put"])
-            k = st.number_input("Digi Strike", value=100.0)
+            otype = st.radio("Digi Type", ["Call", "Put"], horizontal=True)
+            k = st.number_input("Digi Strike", value=100.0, step=0.5)
             pay = st.number_input("Payout", value=1.0)
             if st.button("Add Digital"):
-                st.session_state.portfolio.append(DigitalOption(k, pay, otype, pos))
+                st.session_state.portfolio.append(DigitalOption(k, pay, otype, pos, sigma_override=local_vol))
+                st.rerun()
 
         elif inst_type == "Zero Bond":
             face = st.number_input("Face Value", value=100.0)
             if st.button("Add Bond"):
-                st.session_state.portfolio.append(ZeroCouponBond(face, pos))
-
-        elif inst_type == "Stock":
-            if st.button("Add Stock"):
-                st.session_state.portfolio.append(Stock(pos))
+                st.session_state.portfolio.append(ZeroCouponBond(face, pos, sigma_override=local_vol))
+                st.rerun()
         
         st.divider()
         st.markdown("**Current Portfolio:**")
+        
         if st.session_state.portfolio:
             for i, leg in enumerate(st.session_state.portfolio):
-                st.text(f"{i+1}. {leg.name()}")
-            if st.button("Clear Portfolio"):
+                col_name, col_del = st.columns([4, 1])
+                premium = leg.price(S_curr, T_curr, r_curr, sigma_curr)
+                # Indicate if local vol is active
+                vol_badge = f" (σ={leg.sigma_override:.2f})" if leg.sigma_override else ""
+                col_name.text(f"{i+1}. {leg.name()}{vol_badge} | ${abs(premium):.2f}")
+                
+                if col_del.button("❌", key=f"del_{i}"):
+                    st.session_state.portfolio.pop(i)
+                    st.rerun()
+            
+            st.write("") 
+            if st.button("Clear All"):
                 st.session_state.portfolio = []
                 st.rerun()
         else:
@@ -324,25 +380,62 @@ with tab1:
     with col_viz:
         st.subheader("Payoff Analysis")
         if st.session_state.portfolio:
-            s_range = np.linspace(S_curr * 0.5, S_curr * 1.5, 200)
+            # View Toggle for Absolute vs PnL
+            view_mode = st.radio("Chart View", ["Absolute Value", "Net PnL (Cost Adjusted)"], horizontal=True)
             
-            # Vectorized calc
+            s_range = np.linspace(S_curr * 0.5, S_curr * 1.5, 200)
             payoff_total = np.zeros_like(s_range)
             price_total = np.zeros_like(s_range)
+            
+            port_delta, port_gamma, port_vega, port_theta = 0.0, 0.0, 0.0, 0.0
+            initial_cost = 0.0
             
             for leg in st.session_state.portfolio:
                 payoff_total += leg.payoff(s_range)
                 price_total += leg.price(s_range, T_curr, r_curr, sigma_curr)
-            
+                
+                # Aggregate Greeks
+                port_delta += leg.delta(S_curr, T_curr, r_curr, sigma_curr)
+                port_gamma += leg.gamma(S_curr, T_curr, r_curr, sigma_curr)
+                port_vega += leg.vega(S_curr, T_curr, r_curr, sigma_curr)
+                port_theta += leg.theta(S_curr, T_curr, r_curr, sigma_curr)
+                
+                # Aggregate Day 0 Cost
+                initial_cost += leg.price(S_curr, T_curr, r_curr, sigma_curr)
+
+            # Apply PnL Transformation if selected
+            if view_mode == "Net PnL (Cost Adjusted)":
+                payoff_total -= initial_cost
+                price_total -= initial_cost
+                y_axis_title = "Net PnL ($)"
+            else:
+                y_axis_title = "Absolute Value ($)"
+
+            # Plotting
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=s_range, y=payoff_total, name="Expiry Payoff", line=dict(dash='dash')))
             fig.add_trace(go.Scatter(x=s_range, y=price_total, name="Current Price (BSM)", line=dict(width=3)))
+            
+            # Add a zero line if viewing PnL
+            if view_mode == "Net PnL (Cost Adjusted)":
+                fig.add_hline(y=0, line_color="red", opacity=0.5, line_width=1)
+                
             fig.add_vline(x=S_curr, line_dash="dot", annotation_text="Spot")
-            fig.update_layout(title="Structure Value", xaxis_title="Spot", yaxis_title="PnL")
+            fig.update_layout(title="Structure Value", xaxis_title="Spot", yaxis_title=y_axis_title)
             st.plotly_chart(fig, use_container_width=True)
             
-            current_val = sum([leg.price(S_curr, T_curr, r_curr, sigma_curr) for leg in st.session_state.portfolio])
-            st.metric("Total Portfolio Value (BSM)", f"${current_val:.2f}")
+            # Value Metric & Greeks Table
+            st.metric("Total Portfolio Value (Day 0 Cost)", f"${initial_cost:.2f}")
+            
+            st.divider()
+            st.markdown("#### **Portfolio Greeks**")
+            greeks_df = pd.DataFrame({
+                "Delta (Δ)": [f"{port_delta:.4f}"],
+                "Gamma (Γ)": [f"{port_gamma:.4f}"],
+                "Theta (Θ)": [f"{port_theta:.4f}"],
+                "Vega (ν)": [f"{port_vega:.4f}"]
+            })
+            st.table(greeks_df.style.set_properties(**{'text-align': 'center'}))
 
 # ==========================================
 # TAB 2: ADVANCED PRICING (Merton & Heston)
